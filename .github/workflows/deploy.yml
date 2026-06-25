@@ -1,0 +1,43 @@
+name: Deploy MERN App
+
+on:
+  push:
+    branches: [ main ]  # Trigger only on main branch push
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to DockerHub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Build and push Docker images
+      run: |
+        docker build -t ${{ secrets.DOCKER_USERNAME }}/mern-client ./client
+        docker build -t ${{ secrets.DOCKER_USERNAME }}/mern-server ./server
+        docker push ${{ secrets.DOCKER_USERNAME }}/mern-client
+        docker push ${{ secrets.DOCKER_USERNAME }}/mern-server
+
+    - name: Deploy to EC2 via SSH
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ubuntu
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        script: |
+          docker pull ${{ secrets.DOCKER_USERNAME }}/mern-client
+          docker pull ${{ secrets.DOCKER_USERNAME }}/mern-server
+          docker stop client || true && docker rm client || true
+          docker stop server || true && docker rm server || true
+          docker run -d -p 80:80 --name client ${{ secrets.DOCKER_USERNAME }}/mern-client
+          docker run -d -p 5000:5000 --name server ${{ secrets.DOCKER_USERNAME }}/mern-server
