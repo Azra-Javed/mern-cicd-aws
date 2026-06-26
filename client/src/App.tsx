@@ -11,7 +11,7 @@ interface PipelineStage {
 }
 
 const stages: PipelineStage[] = [
-  { id: "code",   label: "Code",   icon: "✏️", description: "Push your code to GitHub", duration: 1200 },
+  { id: "code",   label: "Code",   icon: "✏️", description: "Push your code to GitHub", duration: 800 },
   { id: "build",  label: "Build",  icon: "⚙️", description: "Install dependencies & compile", duration: 1200 },
   { id: "test",   label: "Test",   icon: "🧪", description: "Run unit & integration tests", duration: 1000 },
   { id: "deploy", label: "Deploy", icon: "🚀", description: "Upload to S3 & invalidate CDN", duration: 900 },
