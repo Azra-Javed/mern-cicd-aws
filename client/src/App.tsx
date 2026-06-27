@@ -1,314 +1,296 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 
-type Stage = "code" | "build" | "test" | "deploy" | "live";
+// ── Types ────────────────────────────────────────────────────────────────────
+type StageStatus = "waiting" | "running" | "passed" | "failed";
 
-interface PipelineStage {
-  id: Stage;
-  label: string;
+interface Stage {
+  id: string;
+  name: string;
   icon: string;
-  description: string;
   duration: number;
 }
 
-const stages: PipelineStage[] = [
-  { id: "code",   label: "Code",   icon: "✏️", description: "Push your code to GitHub", duration: 800 },
-  { id: "build",  label: "Build",  icon: "⚙️", description: "Install dependencies & compile", duration: 1200 },
-  { id: "test",   label: "Test",   icon: "🧪", description: "Run unit & integration tests", duration: 1000 },
-  { id: "deploy", label: "Deploy", icon: "🚀", description: "Upload to S3 & invalidate CDN", duration: 900 },
-  { id: "live",   label: "Live",   icon: "✅", description: "Your site is live!", duration: 0 },
+interface StageState {
+  status: StageStatus;
+  log: string[];
+  ms: number;
+}
+
+type PipelineStatus = "idle" | "running" | "passed" | "failed";
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const STAGES: Stage[] = [
+  { id: "checkout", name: "Checkout",    icon: "⬇",  duration: 700  },
+  { id: "install",  name: "Install",     icon: "📦",  duration: 1100 },
+  { id: "lint",     name: "Lint",        icon: "🔍",  duration: 800  },
+  { id: "test",     name: "Test",        icon: "🧪",  duration: 1200 },
+  { id: "build",    name: "Build",       icon: "⚙",   duration: 1000 },
+  { id: "deploy",   name: "Deploy",      icon: "🚀",  duration: 900  },
 ];
 
-type Status = "idle" | "running" | "done" | "failed";
+const STAGE_LOGS: Record<string, string[]> = {
+  checkout: ["Cloning repository...", "Checked out branch: main", "Commit: a3f92bc"],
+  install:  ["Running npm install...", "Added 847 packages", "No vulnerabilities found"],
+  lint:     ["Checking code style...", "ESLint: 0 errors, 2 warnings", "Prettier: all files formatted"],
+  test:     ["Running test suite...", "24 tests passed", "Coverage: 91%"],
+  build:    ["Compiling TypeScript...", "Bundling assets...", "Build size: 142 KB (gzipped)"],
+  deploy:   ["Uploading to S3...", "Invalidating CloudFront cache...", "✓ Live at https://myapp.com"],
+};
 
+const FAIL_LOGS: Record<string, string[]> = {
+  test:  ["Running test suite...", "FAIL src/auth.test.ts", "Expected 200, received 401 — 1 test failed"],
+  lint:  ["Checking code style...", "ESLint: 3 errors found", "Fix errors before proceeding"],
+  build: ["Compiling TypeScript...", "error TS2345: Argument of type 'string' is not assignable", "Build failed"],
+};
+
+const FAIL_STAGES = ["test", "lint", "build"];
+
+const initStates = (): Record<string, StageState> =>
+  Object.fromEntries(STAGES.map((s) => [s.id, { status: "waiting", log: [], ms: 0 }]));
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const fmtMs = (ms: number) => ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+
+// ── Component ────────────────────────────────────────────────────────────────
 export default function App() {
-  const [current, setCurrent] = useState<number>(-1);
-  const [status, setStatus] = useState<Status>("idle");
-  const [log, setLog] = useState<string[]>([]);
+  const [states, setStates] = useState<Record<string, StageState>>(initStates());
+  const [pipeline, setPipeline] = useState<PipelineStatus>("idle");
+  const [activeStage, setActiveStage] = useState<string | null>(null);
+  const [runCount, setRunCount] = useState(0);
+  const [elapsed, setElapsed] = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const addLog = (msg: string) =>
-    setLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  useEffect(() => {
+    if (pipeline === "running") {
+      timerRef.current = setInterval(() => setElapsed((e) => e + 100), 100);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+  }, [pipeline]);
 
-  const runPipeline = async () => {
-    setStatus("running");
-    setCurrent(-1);
-    setLog([]);
-    addLog("🔁 Pipeline started...");
+  const update = (id: string, patch: Partial<StageState>) =>
+    setStates((prev) => ({ ...prev, [id]: { ...prev[id], ...patch } }));
 
-    for (let i = 0; i < stages.length; i++) {
-      const stage = stages[i];
-      setCurrent(i);
-      addLog(`▶ ${stage.label}: ${stage.description}`);
+  const run = async () => {
+    if (pipeline === "running") return;
+    setStates(initStates());
+    setPipeline("running");
+    setActiveStage(null);
+    setElapsed(0);
+    setRunCount((c) => c + 1);
 
-      await new Promise((r) => setTimeout(r, stage.duration));
+    const failAt = Math.random() < 0.3
+      ? FAIL_STAGES[Math.floor(Math.random() * FAIL_STAGES.length)]
+      : null;
 
-      // Simulate random test failure
-      if (stage.id === "test" && Math.random() < 0.2) {
-        addLog("❌ Tests failed! Fix your code and retry.");
-        setStatus("failed");
-        return;
-      }
-
-      addLog(`✔ ${stage.label} complete`);
+    for (const stage of STAGES) {
+      setActiveStage(stage.id);
+      update(stage.id, { status: "running", log: [], ms: 0 });
+      const start = Date.now();
+      await sleep(stage.duration);
+      const ms = Date.now() - start;
+      const didFail = stage.id === failAt;
+      const logs = didFail ? (FAIL_LOGS[stage.id] ?? STAGE_LOGS[stage.id]) : STAGE_LOGS[stage.id];
+      update(stage.id, { status: didFail ? "failed" : "passed", log: logs, ms });
+      if (didFail) { setActiveStage(null); setPipeline("failed"); return; }
     }
 
-    addLog("🎉 Deployment successful! Site is live.");
-    setStatus("done");
+    setActiveStage(null);
+    setPipeline("passed");
   };
 
   const reset = () => {
-    setCurrent(-1);
-    setStatus("idle");
-    setLog([]);
+    setStates(initStates());
+    setPipeline("idle");
+    setActiveStage(null);
+    setElapsed(0);
   };
 
-  const getStageColor = (index: number) => {
-    if (status === "failed" && index === current) return "#ef4444";
-    if (index < current || status === "done") return "#22c55e";
-    if (index === current) return "#f59e0b";
-    return "#334155";
-  };
+  const passedCount = STAGES.filter((s) => states[s.id].status === "passed").length;
 
   return (
-    <div style={styles.page}>
-      {/* Header */}
-      <div style={styles.header}>
-        <span style={styles.badge}>CI/CD</span>
-        <h1 style={styles.title}>Pipeline Simulator</h1>
-        <p style={styles.subtitle}>Watch your code go from commit → live</p>
-      </div>
-
-      {/* Pipeline Stages */}
-      <div style={styles.pipeline}>
-        {stages.map((stage, i) => (
-          <div key={stage.id} style={styles.stageWrapper}>
-            <div
-              style={{
-                ...styles.stageBox,
-                borderColor: getStageColor(i),
-                boxShadow: i === current && status === "running"
-                  ? `0 0 16px ${getStageColor(i)}66`
-                  : "none",
-              }}
-            >
-              <span style={styles.stageIcon}>{stage.icon}</span>
-              <span style={{ ...styles.stageLabel, color: getStageColor(i) }}>
-                {stage.label}
-              </span>
-              {i === current && status === "running" && (
-                <span style={styles.spinner}>⏳</span>
-              )}
+    <div style={s.root}>
+      {/* Sidebar */}
+      <aside style={s.sidebar}>
+        <div style={s.brand}>
+          <span style={s.brandDot} />
+          <span style={s.brandName}>FlowCI</span>
+        </div>
+        <nav style={s.nav}>
+          {[
+            { icon: "◈", label: "Pipelines", active: true },
+            { icon: "⊞", label: "Projects",  active: false },
+            { icon: "◎", label: "Settings",  active: false },
+          ].map((item) => (
+            <div key={item.label} style={{ ...s.navItem, ...(item.active ? s.navActive : {}) }}>
+              <span style={s.navIcon}>{item.icon}</span>
+              <span>{item.label}</span>
             </div>
-            {i < stages.length - 1 && (
-              <div
-                style={{
-                  ...styles.arrow,
-                  color: i < current || status === "done" ? "#22c55e" : "#334155",
-                }}
-              >
-                →
+          ))}
+        </nav>
+        <div style={s.sideStats}>
+          {[
+            { label: "Runs",   val: String(runCount), color: "#94a3b8" },
+            { label: "Status", val: pipeline.toUpperCase(),
+              color: pipeline === "passed" ? "#4ade80" : pipeline === "failed" ? "#f87171" : pipeline === "running" ? "#facc15" : "#64748b" },
+            { label: "Time",   val: fmtMs(elapsed), color: "#94a3b8" },
+          ].map(({ label, val, color }) => (
+            <div key={label} style={s.statRow}>
+              <span style={s.statLabel}>{label}</span>
+              <span style={{ ...s.statVal, color }}>{val}</span>
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      {/* Main */}
+      <main style={s.main}>
+        <header style={s.header}>
+          <div>
+            <p style={s.eyebrow}>main → production</p>
+            <h1 style={s.title}>Pipeline Run</h1>
+          </div>
+          <div style={s.actions}>
+            <button style={s.btnGhost} onClick={reset} disabled={pipeline === "running"}>Reset</button>
+            <button style={{ ...s.btnPrimary, opacity: pipeline === "running" ? 0.5 : 1 }} onClick={run} disabled={pipeline === "running"}>
+              {pipeline === "running" ? "Running…" : "▶  Run Pipeline"}
+            </button>
+          </div>
+        </header>
+
+        {/* Progress */}
+        <div style={s.track}>
+          <div style={{
+            ...s.bar,
+            width: `${(passedCount / STAGES.length) * 100}%`,
+            background: pipeline === "failed" ? "#f87171" : pipeline === "passed" ? "#4ade80" : "#818cf8",
+          }} />
+        </div>
+
+        {/* Cards */}
+        <div style={s.grid}>
+          {STAGES.map((stage, i) => {
+            const st = states[stage.id];
+            const isActive = activeStage === stage.id;
+            const borderColor =
+              st.status === "passed" ? "#4ade80" :
+              st.status === "failed" ? "#f87171" :
+              st.status === "running" ? "#818cf8" : "#1e293b";
+
+            return (
+              <div key={stage.id} style={{
+                ...s.card,
+                borderColor,
+                boxShadow: isActive ? `0 0 0 1px ${borderColor}30, 0 4px 20px ${borderColor}15` : "none",
+              }}>
+                <div style={s.cardTop}>
+                  <div style={{
+                    ...s.cardIcon,
+                    background: st.status === "passed" ? "#14532d" : st.status === "failed" ? "#450a0a" : st.status === "running" ? "#1e1b4b" : "#0f172a",
+                  }}>
+                    {st.status === "running" ? <span style={s.spin}>◌</span> : <span>{stage.icon}</span>}
+                  </div>
+                  <div style={s.cardMeta}>
+                    <span style={s.cardStep}>STEP {i + 1}</span>
+                    <span style={s.cardName}>{stage.name}</span>
+                  </div>
+                  <span style={{
+                    ...s.badge,
+                    background: st.status === "passed" ? "#14532d" : st.status === "failed" ? "#450a0a" : st.status === "running" ? "#1e1b4b" : "#0f172a",
+                    color: st.status === "passed" ? "#4ade80" : st.status === "failed" ? "#f87171" : st.status === "running" ? "#818cf8" : "#475569",
+                  }}>
+                    {st.status === "waiting" ? "—" : st.status === "running" ? "running" : st.status === "passed" ? "✓ passed" : "✗ failed"}
+                  </span>
+                </div>
+
+                {st.ms > 0 && <div style={s.cardTime}>{fmtMs(st.ms)}</div>}
+
+                {st.log.length > 0 && (
+                  <div style={s.logBox}>
+                    {st.log.map((line, j) => (
+                      <div key={j} style={{
+                        ...s.logLine,
+                        color: line.startsWith("✓") ? "#4ade80"
+                             : line.toLowerCase().includes("fail") || line.toLowerCase().includes("error") ? "#f87171"
+                             : "#94a3b8",
+                      }}>{line}</div>
+                    ))}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* Status Banner */}
-      {status === "done" && (
-        <div style={{ ...styles.banner, background: "#14532d", borderColor: "#22c55e" }}>
-          🎉 Site deployed successfully!
+            );
+          })}
         </div>
-      )}
-      {status === "failed" && (
-        <div style={{ ...styles.banner, background: "#450a0a", borderColor: "#ef4444" }}>
-          ❌ Pipeline failed at <strong>Test</strong> stage. Fix & retry!
-        </div>
-      )}
 
-      {/* Buttons */}
-      <div style={styles.btnRow}>
-        <button
-          style={{
-            ...styles.btn,
-            background: status === "running" ? "#334155" : "#6366f1",
-            cursor: status === "running" ? "not-allowed" : "pointer",
-          }}
-          onClick={runPipeline}
-          disabled={status === "running"}
-        >
-          {status === "running" ? "Running..." : "▶ Run Pipeline"}
-        </button>
-        <button style={{ ...styles.btn, background: "#334155" }} onClick={reset}>
-          ↺ Reset
-        </button>
-      </div>
-
-      {/* Log Console */}
-      {log.length > 0 && (
-        <div style={styles.console}>
-          <div style={styles.consoleHeader}>
-            <span style={styles.dot} />
-            <span style={styles.dot} />
-            <span style={styles.dot} />
-            <span style={styles.consoleTitle}>pipeline.log</span>
+        {/* Result Banner */}
+        {pipeline === "passed" && (
+          <div style={{ ...s.banner, borderColor: "#4ade80", background: "#052e16" }}>
+            <span style={{ fontSize: "22px" }}>🎉</span>
+            <div>
+              <p style={{ ...s.bannerTitle, color: "#4ade80" }}>Pipeline passed</p>
+              <p style={s.bannerSub}>All 6 stages completed · {fmtMs(elapsed)} total</p>
+            </div>
           </div>
-          <div style={styles.consoleBody}>
-            {log.map((line, i) => (
-              <div key={i} style={styles.logLine}>
-                {line}
-              </div>
-            ))}
+        )}
+        {pipeline === "failed" && (
+          <div style={{ ...s.banner, borderColor: "#f87171", background: "#2d0707" }}>
+            <span style={{ fontSize: "22px" }}>❌</span>
+            <div>
+              <p style={{ ...s.bannerTitle, color: "#f87171" }}>Pipeline failed</p>
+              <p style={s.bannerSub}>{passedCount} of {STAGES.length} stages completed · fix errors and re-run</p>
+            </div>
           </div>
-        </div>
-      )}
-
-      <p style={styles.hint}>
-        💡 There's a 20% chance the test stage fails — just like real CI/CD!
-      </p>
+        )}
+      </main>
     </div>
   );
 }
 
-const styles: Record<string, React.CSSProperties> = {
-  page: {
-    minHeight: "100vh",
-    background: "#0f172a",
-    color: "#e2e8f0",
-    fontFamily: "'Courier New', monospace",
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    padding: "40px 20px",
-    gap: "28px",
-  },
-  header: {
-    textAlign: "center",
-  },
-  badge: {
-    background: "#6366f1",
-    color: "#fff",
-    fontSize: "11px",
-    fontWeight: 700,
-    letterSpacing: "2px",
-    padding: "4px 12px",
-    borderRadius: "20px",
-    textTransform: "uppercase",
-  },
-  title: {
-    fontSize: "32px",
-    fontWeight: 800,
-    margin: "12px 0 6px",
-    color: "#f1f5f9",
-  },
-  subtitle: {
-    color: "#94a3b8",
-    fontSize: "14px",
-    margin: 0,
-  },
-  pipeline: {
-    display: "flex",
-    alignItems: "center",
-    flexWrap: "wrap",
-    gap: "8px",
-    justifyContent: "center",
-  },
-  stageWrapper: {
-    display: "flex",
-    alignItems: "center",
-    gap: "8px",
-  },
-  stageBox: {
-    border: "2px solid",
-    borderRadius: "12px",
-    padding: "14px 18px",
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: "6px",
-    minWidth: "80px",
-    transition: "all 0.3s ease",
-    background: "#1e293b",
-  },
-  stageIcon: {
-    fontSize: "22px",
-  },
-  stageLabel: {
-    fontSize: "12px",
-    fontWeight: 700,
-    letterSpacing: "1px",
-    textTransform: "uppercase",
-  },
-  spinner: {
-    fontSize: "12px",
-    animation: "spin 1s linear infinite",
-  },
-  arrow: {
-    fontSize: "20px",
-    fontWeight: 700,
-    transition: "color 0.3s",
-  },
-  banner: {
-    border: "1px solid",
-    borderRadius: "10px",
-    padding: "12px 24px",
-    fontSize: "14px",
-    fontWeight: 600,
-  },
-  btnRow: {
-    display: "flex",
-    gap: "12px",
-  },
-  btn: {
-    color: "#fff",
-    border: "none",
-    borderRadius: "8px",
-    padding: "12px 28px",
-    fontSize: "14px",
-    fontWeight: 700,
-    letterSpacing: "0.5px",
-    transition: "opacity 0.2s",
-  },
-  console: {
-    width: "100%",
-    maxWidth: "600px",
-    background: "#0a0f1e",
-    borderRadius: "12px",
-    border: "1px solid #1e293b",
-    overflow: "hidden",
-  },
-  consoleHeader: {
-    background: "#1e293b",
-    padding: "10px 16px",
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-  },
-  dot: {
-    width: "10px",
-    height: "10px",
-    borderRadius: "50%",
-    background: "#475569",
-  },
-  consoleTitle: {
-    marginLeft: "8px",
-    fontSize: "12px",
-    color: "#64748b",
-  },
-  consoleBody: {
-    padding: "16px",
-    maxHeight: "200px",
-    overflowY: "auto",
-    display: "flex",
-    flexDirection: "column",
-    gap: "6px",
-  },
-  logLine: {
-    fontSize: "12px",
-    color: "#94a3b8",
-    lineHeight: "1.6",
-  },
-  hint: {
-    fontSize: "12px",
-    color: "#475569",
-    textAlign: "center",
-  },
+// ── Styles ───────────────────────────────────────────────────────────────────
+const s: Record<string, React.CSSProperties> = {
+  root: { display: "flex", minHeight: "100vh", background: "#080f1e", color: "#e2e8f0", fontFamily: "'Inter','Segoe UI',system-ui,sans-serif", fontSize: "14px" },
+
+  sidebar: { width: "200px", background: "#0d1627", borderRight: "1px solid #1e293b", display: "flex", flexDirection: "column", padding: "24px 0", flexShrink: 0 },
+  brand: { display: "flex", alignItems: "center", gap: "10px", padding: "0 20px 28px", borderBottom: "1px solid #1e293b" },
+  brandDot: { width: "8px", height: "8px", borderRadius: "50%", background: "#818cf8", boxShadow: "0 0 8px #818cf8" },
+  brandName: { fontWeight: 700, fontSize: "16px", letterSpacing: "-0.3px", color: "#f1f5f9" },
+  nav: { padding: "16px 12px", display: "flex", flexDirection: "column", gap: "4px" },
+  navItem: { display: "flex", alignItems: "center", gap: "10px", padding: "8px 12px", borderRadius: "8px", color: "#475569", cursor: "pointer", fontSize: "13px", fontWeight: 500 },
+  navActive: { background: "#1e293b", color: "#e2e8f0" },
+  navIcon: { fontSize: "15px" },
+  sideStats: { marginTop: "auto", padding: "20px", borderTop: "1px solid #1e293b", display: "flex", flexDirection: "column", gap: "12px" },
+  statRow: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  statLabel: { color: "#475569", fontSize: "12px" },
+  statVal: { fontWeight: 700, fontSize: "12px", fontVariantNumeric: "tabular-nums" },
+
+  main: { flex: 1, display: "flex", flexDirection: "column", padding: "32px", gap: "24px", overflowY: "auto" },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "flex-end" },
+  eyebrow: { margin: "0 0 4px", fontSize: "11px", letterSpacing: "1px", textTransform: "uppercase", color: "#475569" },
+  title: { margin: 0, fontSize: "22px", fontWeight: 700, color: "#f1f5f9", letterSpacing: "-0.4px" },
+  actions: { display: "flex", gap: "10px", alignItems: "center" },
+  btnGhost: { background: "transparent", border: "1px solid #1e293b", color: "#64748b", padding: "8px 16px", borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: 500 },
+  btnPrimary: { background: "#4f46e5", border: "none", color: "#fff", padding: "8px 20px", borderRadius: "8px", cursor: "pointer", fontSize: "13px", fontWeight: 600, letterSpacing: "0.2px" },
+
+  track: { height: "3px", background: "#1e293b", borderRadius: "99px", overflow: "hidden" },
+  bar: { height: "100%", borderRadius: "99px", transition: "width 0.4s ease, background 0.3s" },
+
+  grid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "12px" },
+  card: { background: "#0d1627", border: "1px solid", borderRadius: "12px", padding: "16px", display: "flex", flexDirection: "column", gap: "12px", transition: "border-color 0.3s, box-shadow 0.3s" },
+  cardTop: { display: "flex", alignItems: "center", gap: "12px" },
+  cardIcon: { width: "36px", height: "36px", borderRadius: "8px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "16px", flexShrink: 0 },
+  cardMeta: { display: "flex", flexDirection: "column", gap: "2px", flex: 1 },
+  cardStep: { fontSize: "10px", letterSpacing: "1px", color: "#475569", fontWeight: 600 },
+  cardName: { fontSize: "14px", fontWeight: 600, color: "#f1f5f9" },
+  badge: { fontSize: "11px", fontWeight: 600, padding: "3px 8px", borderRadius: "6px", flexShrink: 0, letterSpacing: "0.2px" },
+  cardTime: { fontSize: "11px", color: "#475569", fontVariantNumeric: "tabular-nums" },
+  logBox: { background: "#060d1a", borderRadius: "6px", padding: "10px 12px", display: "flex", flexDirection: "column", gap: "4px" },
+  logLine: { fontSize: "11px", lineHeight: "1.6", fontFamily: "'JetBrains Mono','Fira Code',monospace" },
+
+  spin: { display: "inline-block", animation: "spin 1s linear infinite", fontSize: "16px", color: "#818cf8" },
+
+  banner: { border: "1px solid", borderRadius: "12px", padding: "16px 20px", display: "flex", alignItems: "center", gap: "16px" },
+  bannerTitle: { margin: "0 0 2px", fontWeight: 700, fontSize: "15px" },
+  bannerSub: { margin: 0, color: "#64748b", fontSize: "12px" },
 };
